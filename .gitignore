@@ -1,0 +1,26 @@
+# === Environment ===
+__pycache__/
+*.pyc
+*.pyo
+*.DS_Store
+
+# === Data & Logs ===
+data/
+mlruns/
+*.log
+
+# === Model Checkpoints ===
+*.pt
+*.ckpt
+*.npz
+
+# === Virtual Envs ===
+.env/
+.venv/
+env/
+venv/
+
+# === IDE & OS junk ===
+.vscode/
+.idea/
+*.swp
