@@ -146,7 +146,74 @@ class MMDDistance(nn.Module):
         return xx.mean() + yy.mean() - 2 * xy.mean()
 
 
-def sample_text_embeddings(llm_model, num_samples=NUM_SAMPLES_ALIGNMENT, device=DEVICE):
+class OTDDDistance(nn.Module):
+    """
+    Optimal Transport Dataset Distance (OTDD) for alignment.
+    Requires labels to group embeddings by class and compute class-level optimal transport.
+    """
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.num_classes = num_classes
+    
+    def forward(self, x, y, x_labels, y_labels):
+        """
+        Args:
+            x: Image embeddings [B, seq_len, embed_dim] or [B, embed_dim]
+            y: Text embeddings [B, seq_len, embed_dim] or [B, embed_dim]
+            x_labels: Image labels [B]
+            y_labels: Text labels [B]
+        """
+        if x.dim() == 3:
+            x = x.mean(dim=1)  # [B, embed_dim]
+        if y.dim() == 3:
+            y = y.mean(dim=1)  # [B, embed_dim]
+        
+        x_centroids = []
+        y_centroids = []
+        x_counts = []
+        y_counts = []
+        
+        for c in range(self.num_classes):
+            x_mask = (x_labels == c)
+            y_mask = (y_labels == c)
+            
+            if x_mask.sum() > 0:
+                x_centroids.append(x[x_mask].mean(dim=0))
+                x_counts.append(x_mask.sum().float())
+            else:
+                # If no samples for this class, use zero vector
+                x_centroids.append(torch.zeros_like(x[0]))
+                x_counts.append(torch.tensor(1e-6, device=x.device))
+            
+            if y_mask.sum() > 0:
+                y_centroids.append(y[y_mask].mean(dim=0))
+                y_counts.append(y_mask.sum().float())
+            else:
+                y_centroids.append(torch.zeros_like(y[0]))
+                y_counts.append(torch.tensor(1e-6, device=y.device))
+        
+        x_centroids = torch.stack(x_centroids)  # [num_classes, embed_dim]
+        y_centroids = torch.stack(y_centroids)  # [num_classes, embed_dim]
+        x_counts = torch.stack(x_counts)  # [num_classes]
+        y_counts = torch.stack(y_counts)  # [num_classes]
+        
+        x_probs = x_counts / x_counts.sum()
+        y_probs = y_counts / y_counts.sum()
+        
+        x_expanded = x_centroids.unsqueeze(1)  # [num_classes, 1, embed_dim]
+        y_expanded = y_centroids.unsqueeze(0)  # [1, num_classes, embed_dim]
+        cost_matrix = ((x_expanded - y_expanded) ** 2).sum(dim=2)  # [num_classes, num_classes]
+        
+        min_costs, _ = cost_matrix.min(dim=1)  # For each x class, find closest y class
+        otdd = (x_probs * min_costs).sum()
+        
+        min_costs_rev, _ = cost_matrix.min(dim=0)
+        otdd_rev = (y_probs * min_costs_rev).sum()
+        
+        return (otdd + otdd_rev) / 2
+
+
+def sample_text_embeddings(llm_model, num_samples=NUM_SAMPLES_ALIGNMENT, device=DEVICE, num_classes=NUM_CLASSES):
     llm_model.eval()
     embed_layer = llm_model.get_input_embeddings()
     vocab_size = embed_layer.weight.size(0)
@@ -154,26 +221,35 @@ def sample_text_embeddings(llm_model, num_samples=NUM_SAMPLES_ALIGNMENT, device=
     with torch.no_grad():
         token_ids = torch.randint(0, vocab_size, (num_samples, 64), device=device)
         token_embeds = embed_layer(token_ids)
+        # Assign labels uniformly across classes for OTDD
+        labels = torch.randint(0, num_classes, (num_samples,), device=device)
     
-    return token_embeds
+    return token_embeds, labels
 
 
-def train_alignment_epoch(model, image_loader, target_embeddings, optimizer, distance_metric, device=DEVICE):
+def train_alignment_epoch(model, image_loader, target_embeddings, target_labels, optimizer, distance_metric, device=DEVICE, use_otdd=False):
     model.train()
     total_loss = 0
     num_batches = 0
     
-    for images, _ in image_loader:
+    for images, image_labels in image_loader:
         images = images.to(device)
+        image_labels = image_labels.to(device)
         batch_size = images.size(0)
         
         indices = torch.randint(0, target_embeddings.size(0), (batch_size,), device=device)
         target_embeds = target_embeddings[indices].to(device)
+        target_labels_batch = target_labels[indices].to(device)
         
         optimizer.zero_grad()
         image_embeds = model.tokenizer(images)
         image_embeds = image_embeds + model.pos_embed
-        loss = distance_metric(image_embeds, target_embeds)
+        
+        if use_otdd:
+            loss = distance_metric(image_embeds, target_embeds, image_labels, target_labels_batch)
+        else:
+            loss = distance_metric(image_embeds, target_embeds)
+        
         loss.backward()
         optimizer.step()
         
@@ -183,7 +259,7 @@ def train_alignment_epoch(model, image_loader, target_embeddings, optimizer, dis
     return total_loss / num_batches if num_batches > 0 else 0
 
 
-def train_task_epoch(model, dataloader, optimizer, criterion, device=DEVICE):
+def train_task_epoch(model, dataloader, optimizer, criterion, device=DEVICE, max_grad_norm=1.0):
     model.train()
     total_loss, total_correct, total_samples = 0, 0, 0
 
@@ -193,6 +269,11 @@ def train_task_epoch(model, dataloader, optimizer, criterion, device=DEVICE):
         logits = model(imgs)
         loss = criterion(logits, labels)
         loss.backward()
+        
+        # Gradient clipping to prevent explosion (especially important for LoRA)
+        if max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        
         optimizer.step()
 
         total_loss += loss.item() * imgs.size(0)
@@ -243,7 +324,8 @@ def load_hyperparameters(config_path: Optional[str]) -> Dict:
             'finetune_mode': 'fpt',
             'lora_rank': 16,
             'lora_alpha': 16,
-            'lora_dropout': 0.1
+            'lora_dropout': 0.1,
+            'max_grad_norm': 1.0
         }
 
 
@@ -347,7 +429,7 @@ def train_orca(
             param.requires_grad = False
         
         print("Sampling text embeddings...")
-        target_embeddings = sample_text_embeddings(llm_model, num_samples=NUM_SAMPLES_ALIGNMENT, device=DEVICE)
+        target_embeddings, target_labels = sample_text_embeddings(llm_model, num_samples=NUM_SAMPLES_ALIGNMENT, device=DEVICE, num_classes=NUM_CLASSES)
         
         align_transform = transforms.Compose([
             transforms.ToTensor(),
@@ -357,12 +439,16 @@ def train_orca(
         align_loader = DataLoader(align_dataset, batch_size=config.get('alignment_batch_size', 16), shuffle=True)
         
         distance_metric_name = config.get('alignment_distance', 'mse')
+        use_otdd = (distance_metric_name == 'otdd')
+        
         if distance_metric_name == 'mse':
             distance_metric = MSEDistance().to(DEVICE)
         elif distance_metric_name == 'cosine':
             distance_metric = CosineDistance().to(DEVICE)
         elif distance_metric_name == 'mmd':
             distance_metric = MMDDistance().to(DEVICE)
+        elif distance_metric_name == 'otdd':
+            distance_metric = OTDDDistance(num_classes=NUM_CLASSES).to(DEVICE)
         else:
             distance_metric = MSEDistance().to(DEVICE)
         
@@ -371,7 +457,7 @@ def train_orca(
         
         alignment_epochs = config.get('alignment_epochs', 20)
         for epoch in range(alignment_epochs):
-            loss = train_alignment_epoch(model, align_loader, target_embeddings, align_optimizer, distance_metric, DEVICE)
+            loss = train_alignment_epoch(model, align_loader, target_embeddings, target_labels, align_optimizer, distance_metric, DEVICE, use_otdd=use_otdd)
             if (epoch + 1) % 5 == 0:
                 print(f"Align epoch {epoch+1}/{alignment_epochs}: loss={loss:.6f}")
         
@@ -393,9 +479,10 @@ def train_orca(
         finetune_suffix = f"_LoRA_r{lora_rank}"
     else:
         finetune_suffix = "_FPT"
-    experiment_name = f"ORCA_{model_short_name}{align_suffix}{finetune_suffix}"
+    experiment_name = f"{model_short_name}{align_suffix}{finetune_suffix}"
     mlflow.set_experiment(experiment_name)
-    
+    print(f"Experiment name: {experiment_name}")
+
     task_epochs = config.get('task_epochs', 50)
     best_val_acc = 0.0
     
@@ -406,9 +493,9 @@ def train_orca(
             **{f'hp_{k}': v for k, v in config.items()}
         })
         
-        epoch_pbar = tqdm(range(task_epochs), desc="Training", unit="epoch")
-        for epoch in epoch_pbar:
-            train_loss, train_acc = train_task_epoch(model, train_loader, optimizer, criterion, DEVICE)
+        max_grad_norm = config.get('max_grad_norm', 1.0)  # Default to 1.0 for old configs
+        for epoch in range(task_epochs):
+            train_loss, train_acc = train_task_epoch(model, train_loader, optimizer, criterion, DEVICE, max_grad_norm)
             mlflow.log_metrics({
                 'train_loss': train_loss,
                 'train_acc': train_acc
@@ -422,29 +509,22 @@ def train_orca(
                 }, step=epoch)
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
-                epoch_pbar.set_postfix({
-                    'train_acc': f'{train_acc:.4f}',
-                    'val_acc': f'{val_acc:.4f}',
-                    'best_val': f'{best_val_acc:.4f}'
-                })
+                print(f"Epoch {epoch+1}/{task_epochs} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
+                      f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Best Val Acc: {best_val_acc:.4f}")
             else:
                 test_loss, test_acc = evaluate(model, test_loader, criterion, DEVICE)
                 mlflow.log_metrics({
                     'test_loss': test_loss,
                     'test_acc': test_acc
                 }, step=epoch)
-                epoch_pbar.set_postfix({
-                    'train_acc': f'{train_acc:.4f}',
-                    'test_acc': f'{test_acc:.4f}'
-                })
+                print(f"Epoch {epoch+1}/{task_epochs} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
+                      f"Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}")
             
             if scheduler:
                 scheduler.step()
                 current_lr = scheduler.get_last_lr()[0] if hasattr(scheduler, 'get_last_lr') else None
                 if current_lr:
                     mlflow.log_metric('learning_rate', current_lr, step=epoch)
-        
-        epoch_pbar.close()
         
         if val_loader is not None:
             final_loss, final_acc = evaluate(model, val_loader, criterion, DEVICE)
@@ -466,7 +546,7 @@ def train_orca(
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Unified ORCA Training')
+    parser = argparse.ArgumentParser()
     parser.add_argument('--do_alignment', action='store_true',
                        help='Perform embedding alignment (Stage 2)')
     parser.add_argument('--finetune_mode', type=str, default='lora',

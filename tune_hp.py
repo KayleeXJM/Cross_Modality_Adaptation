@@ -34,7 +34,8 @@ def get_hyperparameter_space(finetune_mode: str = 'fpt') -> Dict:
             'scheduler': ['cosine', 'linear'],
             'dropout': [0.0, 0.1, 0.2],
             'alignment_lr': [1e-5, 1e-4, 5e-4],
-            'alignment_batch_size': [8, 16, 32]
+            'alignment_batch_size': [8, 16, 32],
+            'max_grad_norm': [1.0]
         }
     elif finetune_mode == 'lora':
         return {
@@ -48,7 +49,8 @@ def get_hyperparameter_space(finetune_mode: str = 'fpt') -> Dict:
             'alignment_batch_size': [8, 16, 32],
             'lora_rank': [8, 16, 32],
             'lora_alpha': [8, 16, 32, 64],
-            'lora_dropout': [0.0, 0.05, 0.1, 0.2]
+            'lora_dropout': [0.0, 0.05, 0.1, 0.2],
+            'max_grad_norm': [1.0]
         }
     else:
         return {
@@ -59,7 +61,8 @@ def get_hyperparameter_space(finetune_mode: str = 'fpt') -> Dict:
             'scheduler': ['cosine', 'linear'],
             'dropout': [0.0, 0.1, 0.2],
             'alignment_lr': [1e-5, 1e-4, 5e-4],
-            'alignment_batch_size': [8, 16, 32]
+            'alignment_batch_size': [8, 16, 32],
+            'max_grad_norm': [1.0]
         }
 
 
@@ -86,9 +89,9 @@ def create_train_val_split(val_split=VAL_SPLIT, random_seed=RANDOM_SEED):
     indices = list(range(dataset_size))
     np.random.shuffle(indices)
     
-    split = int(np.floor(val_split * dataset_size))
-    val_indices = indices[:split]
-    train_indices = indices[split:]
+    split_size = int(np.floor(val_split * dataset_size))
+    val_indices = indices[:split_size]
+    train_indices = indices[split_size:]
     
     return train_indices, val_indices
 
@@ -120,7 +123,7 @@ class ASHAScheduler:
                 completed_at_rung.sort(key=lambda x: x[2], reverse=True)
                 top_k = max(1, len(completed_at_rung) // self.reduction_factor)
                 
-                for trial_id, config, result, orig_rung in completed_at_rung[:top_k]:
+                for trial_id, config, result, original_rung in completed_at_rung[:top_k]:
                     if r + 1 <= self.max_rung:
                         self.pending_trials[trial_id] = (config, r + 1, 'promoted')
                         print(f"Promoting trial {trial_id}: rung {r} -> {r + 1} (acc={result:.4f})")
@@ -226,7 +229,7 @@ def main():
                        help='Perform embedding alignment')
     parser.add_argument('--finetune_mode', type=str, default='fpt',
                        choices=['fpt', 'full', 'lora'],
-                       help='Fine-tuning mode: fpt (frozen backbone + layer norms), full (all params), or lora (LoRA adapters)')
+                       help='Fine-tuning mode: fpt (frozen backbone + layer norms), full (all paramters), or lora (Low Rank)')
     parser.add_argument('--max_trials', type=int, default=MAX_TRIALS,
                        help='Maximum number of trials')
     parser.add_argument('--max_rung', type=int, default=MAX_RUNG,
@@ -243,7 +246,7 @@ def main():
                        help='Fixed number of alignment epochs (not tuned)')
     parser.add_argument('--alignment_distance', type=str, default='mse',
                        choices=['mse', 'cosine', 'mmd', 'otdd'],
-                       help='Fixed alignment distance metric (not tuned)')
+                       help='Fixed alignment distance metric (not tuned). Options: mse, cosine, mmd, otdd')
     args = parser.parse_args()
     
     finetune_mode = args.finetune_mode
@@ -298,7 +301,7 @@ def main():
         
         print(f"Resumed: {trial_count} trials, best val_acc: {best_overall_acc:.4f}")
     else:
-        print("\nStarting ASHA search...")
+        print("\nStarting ASHA search")
         trial_count = 0
         best_overall_acc = 0.0
         trial_results = []
