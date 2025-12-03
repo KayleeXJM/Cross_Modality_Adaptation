@@ -1,0 +1,18 @@
+{
+    "lr": 0.0005,
+    "batch_size": 128,
+    "weight_decay": 0.01,
+    "optimizer": "adamw",
+    "scheduler": "cosine",
+    "dropout": 0.1,
+    "alignment_lr": 1e-05,
+    "alignment_batch_size": 8,
+    "lora_rank": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.1,
+    "task_epochs": 50,
+    "alignment_epochs": 15,
+    "alignment_distance": "mse",
+    "finetune_mode": "lora",
+    "max_grad_norm": 1.0
+  }
