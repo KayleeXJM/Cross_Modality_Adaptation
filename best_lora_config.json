@@ -4,7 +4,7 @@
     "weight_decay": 0.01,
     "optimizer": "adamw",
     "scheduler": "cosine",
-    "dropout": 0.1,
+    "dropout": 0.2,
     "alignment_lr": 1e-04,
     "alignment_batch_size": 32,
     "lora_rank": 16,
