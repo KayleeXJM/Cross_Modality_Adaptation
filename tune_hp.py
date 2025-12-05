@@ -13,7 +13,8 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 
-from train import train_orca, load_hyperparameters, DEVICE
+from train import train_orca, DEVICE
+from utils import load_hyperparameters
 
 RANDOM_SEED = 42
 VAL_SPLIT = 0.2
@@ -246,8 +247,8 @@ def main():
     parser.add_argument('--alignment_epochs', type=int, default=15,
                        help='Fixed number of alignment epochs (not tuned)')
     parser.add_argument('--alignment_distance', type=str, default='mse',
-                       choices=['mse', 'cosine', 'mmd', 'otdd'],
-                       help='Options: mse, cosine, mmd, otdd')
+                       choices=['mse', 'mmd', 'otdd'],
+                       help='Options: mse, mmd, otdd')
     args = parser.parse_args()
     
     finetune_mode = args.finetune_mode
@@ -272,7 +273,7 @@ def main():
     summary_file = args.output.replace('.json', '_summary.json')
     
     if args.resume and os.path.exists(args.resume):
-        print(f"Resuming from {args.resume}...")
+        print(f"Resuming from {args.resume}")
         with open(args.resume, 'r') as f:
             progress_data = json.load(f)
         trial_results = progress_data['trial_results']
