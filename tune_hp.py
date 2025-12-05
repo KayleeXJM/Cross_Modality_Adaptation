@@ -212,7 +212,8 @@ def run_trial(
             finetune_mode=finetune_mode,
             config_path=temp_config_path,
             val_loader=val_loader,
-            return_val_acc=True
+            return_val_acc=True,
+            use_test_set=False  # Explicitly disable test set usage during hyperparameter tuning
         )
         
         print(f"Trial {trial_id} done: val_acc={val_acc:.4f}")
@@ -246,7 +247,7 @@ def main():
                        help='Fixed number of alignment epochs (not tuned)')
     parser.add_argument('--alignment_distance', type=str, default='mse',
                        choices=['mse', 'cosine', 'mmd', 'otdd'],
-                       help='Fixed alignment distance metric (not tuned). Options: mse, cosine, mmd, otdd')
+                       help='Options: mse, cosine, mmd, otdd')
     args = parser.parse_args()
     
     finetune_mode = args.finetune_mode
