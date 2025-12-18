@@ -47,8 +47,6 @@ class ClassificationHead(nn.Module):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(embed_dim, num_classes)
-        # self.linear1 = nn.Linear(embed_dim, embed_dim)
-        #self.activation = 
     
     def forward(self, x): 
         # note: we stick with simplest classification head 
